@@ -1631,6 +1631,113 @@ func TestAccAWSSecurityGroup_failWithDiffMismatch(t *testing.T) {
 	})
 }
 
+func TestAccAWSSecurityGroup_ruleLimitExceededAppend(t *testing.T) {
+	var group ec2.SecurityGroup
+	resource.Test(t, resource.TestCase{
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSSecurityGroupDestroy,
+		Steps: []resource.TestStep{
+			// create a valid SG just under the limit
+			{
+				Config: testAccAWSSecurityGroupConfigRuleLimit(0, 50),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckAWSSecurityGroupExists("aws_security_group.test", &group),
+					testAccCheckAWSSecurityGroupRuleCount(&group, 0, 50),
+				),
+			},
+			// add a rule to step over the limit
+			{
+				Config:      testAccAWSSecurityGroupConfigRuleLimit(0, 51),
+				ExpectError: regexp.MustCompile("RulesPerSecurityGroupLimitExceeded"),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckAWSSecurityGroupExists("aws_security_group.test", &group),
+					testAccCheckAWSSecurityGroupRuleCount(&group, 0, 50),
+				),
+			},
+		},
+	})
+}
+
+func TestAccAWSSecurityGroup_ruleLimitExceededPrepend(t *testing.T) {
+	var group ec2.SecurityGroup
+	resource.Test(t, resource.TestCase{
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSSecurityGroupDestroy,
+		Steps: []resource.TestStep{
+			// create a valid SG just under the limit
+			{
+				Config: testAccAWSSecurityGroupConfigRuleLimit(0, 50),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckAWSSecurityGroupExists("aws_security_group.test", &group),
+					testAccCheckAWSSecurityGroupRuleCount(&group, 0, 50),
+				),
+			},
+			// add a rule to step over the limit
+			{
+				Config:      testAccAWSSecurityGroupConfigRuleLimit(1, 51),
+				ExpectError: regexp.MustCompile("RulesPerSecurityGroupLimitExceeded"),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckAWSSecurityGroupExists("aws_security_group.test", &group),
+					testAccCheckAWSSecurityGroupRuleCount(&group, 0, 50),
+				),
+			},
+		},
+	})
+}
+
+func testAccCheckAWSSecurityGroupRuleCount(group *ec2.SecurityGroup, expectedIngressCount int, expectedEgressCount int) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		if actual := len(group.IpPermissions); actual != expectedIngressCount {
+			return fmt.Errorf("Security group ingress rule count %d does not match %d", actual, expectedIngressCount)
+		}
+
+		if actual := len(group.IpPermissionsEgress); actual != expectedEgressCount {
+			return fmt.Errorf("Security group egress rule count %d does not match %d", actual, expectedEgressCount)
+		}
+
+		return nil
+	}
+}
+
+func testAccAWSSecurityGroupConfigRuleLimit(egressStartIndex, egressRulesCount int) string {
+	c := `
+resource "aws_vpc" "test" {
+  cidr_block = "10.1.0.0/16"
+  tags {
+    Name = "terraform-testacc-security-group-rule-limit"
+  }
+}
+
+resource "aws_security_group" "test" {
+  name = "terraform_acceptance_test_rule_limit"
+  description = "Used in the terraform acceptance tests"
+  vpc_id = "${aws_vpc.test.id}"
+
+	tags {
+    Name = "tf-acc-test"
+  }
+
+	// egress rules to exhaust the limit
+`
+
+	for i := egressStartIndex; i < egressRulesCount+egressStartIndex; i++ {
+		c += fmt.Sprintf(`
+  egress {
+		protocol = "tcp"
+		from_port = "${80 + %[1]d}"
+		to_port = "${80 + %[1]d}"
+		cidr_blocks = ["${cidrhost("10.1.0.0/16", %[1]d)}/32"]
+	}
+`, i)
+	}
+
+	c += "\n}"
+
+	return c
+}
+
 const testAccAWSSecurityGroupConfigEmptyRuleDescription = `
 resource "aws_vpc" "foo" {
   cidr_block = "10.1.0.0/16"
